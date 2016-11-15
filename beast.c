@@ -83,6 +83,7 @@ static char *default_ops_name = NULL;
 static int beast_max_filesize = 0;
 static char *local_networkcard = NULL;
 static int beast_now_time = 0;
+static int log_normal_file = 0;
 
 /* {{{ beast_functions[]
  *
@@ -324,8 +325,9 @@ failed:
 *                                                                            *
 *****************************************************************************/
 
-int decrypt_file(int stream, char **retbuf,
-    int *retlen, int *free_buffer TSRMLS_DC)
+int decrypt_file(char *filename, int stream,
+                 char **retbuf, int *retlen,
+                 int *free_buffer TSRMLS_DC)
 {
     struct stat stat_ssb;
     cache_key_t findkey;
@@ -341,6 +343,8 @@ int decrypt_file(int stream, char **retbuf,
     *free_buffer = 0; /* set free buffer flag to false */
 
     if (fstat(stream, &stat_ssb) == -1) {
+        beast_write_log(beast_log_error,
+                      "Failed to readed file state buffer from `%s'", filename);
         retval = -1;
         goto failed;
     }
@@ -366,9 +370,20 @@ int decrypt_file(int stream, char **retbuf,
      */
     headerlen = encrypt_file_header_length + INT_SIZE * 2;
 
-    if (read(stream, header, headerlen) != headerlen
-        || memcmp(header, encrypt_file_header_sign, encrypt_file_header_length))
-    {
+    if (read(stream, header, headerlen) != headerlen) {
+        beast_write_log(beast_log_error,
+                            "Failed to readed file header from `%s'", filename);
+        retval = -1;
+        goto failed;
+    }
+
+    if (memcmp(header, encrypt_file_header_sign, encrypt_file_header_length)) {
+
+        if (log_normal_file) {
+            beast_write_log(beast_log_notice,
+                                      "Is not a encrypted file `%s'", filename);
+        }
+
         retval = -1;
         goto failed;
     }
@@ -395,10 +410,23 @@ int decrypt_file(int stream, char **retbuf,
 
     bodylen = stat_ssb.st_size - headerlen;
 
-    if (!(buffer = malloc(bodylen))
-        || read(stream, buffer, bodylen) != bodylen
-        || ops->decrypt(buffer, bodylen, &decbuf, &declen) == -1)
-    {
+    if (!(buffer = malloc(bodylen))) {
+        beast_write_log(beast_log_error,
+                       "Failed to alloc memory to decrypt file `%s'", filename);
+        retval = -1;
+        goto failed;
+    }
+
+    if (read(stream, buffer, bodylen) != bodylen) {
+        beast_write_log(beast_log_error,
+                            "Failed to readed stream from file `%s'", filename);
+        retval = -1;
+        goto failed;
+    }
+
+    if (ops->decrypt(buffer, bodylen, &decbuf, &declen) == -1) {
+        beast_write_log(beast_log_error,
+                                 "Failed to decrypted for file `%s'", filename);
         retval = -1;
         goto failed;
     }
@@ -462,10 +490,11 @@ cgi_compile_file(zend_file_handle *h, int type TSRMLS_DC)
         goto final;
      }
 
-    retval = decrypt_file(fd, &buffer, &size, &free_buffer TSRMLS_CC);
+    retval = decrypt_file(h->filename, fd, &buffer,
+                          &size, &free_buffer TSRMLS_CC);
     if (retval == -2) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR,
-                     "This program was expired, please contact administrator");
+                      "This program was expired, please contact administrator");
         return NULL;
     }
 
@@ -646,6 +675,25 @@ ZEND_INI_MH(php_beast_set_networkcard)
 }
 
 
+ZEND_INI_MH(php_beast_set_log_normal_file)
+{
+    if (ZSTR_LEN(new_value) == 0) {
+        return FAILURE;
+    }
+
+    if (!strcasecmp(ZSTR_VAL(new_value), "on")
+        || !strcmp(ZSTR_VAL(new_value), "1"))
+    {
+        log_normal_file = 1;
+    } else {
+        log_normal_file = 0;
+    }
+
+    return SUCCESS;
+}
+
+
+
 PHP_INI_BEGIN()
     PHP_INI_ENTRY("beast.cache_size", "10485760", PHP_INI_ALL,
           php_beast_cache_size)
@@ -657,6 +705,8 @@ PHP_INI_BEGIN()
           php_beast_encrypt_handler)
     PHP_INI_ENTRY("beast.networkcard", "eth0", PHP_INI_ALL,
           php_beast_set_networkcard)
+    PHP_INI_ENTRY("beast.log_normal_file", "0", PHP_INI_ALL,
+          php_beast_set_log_normal_file)
 PHP_INI_END()
 
 /* }}} */
@@ -902,7 +952,7 @@ PHP_MINFO_FUNCTION(beast)
 {
     php_info_print_table_start();
     php_info_print_table_header(2,
-        "beast V" BEAST_VERSION " support", "enabled");
+        "beast V" BEAST_VERSION " (PHP7) support", "enabled");
     php_info_print_table_end();
 
     DISPLAY_INI_ENTRIES();
